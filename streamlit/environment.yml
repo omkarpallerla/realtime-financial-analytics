@@ -1,0 +1,12 @@
+# Packages for the Streamlit-in-Snowflake app.
+# In Snowsight's Streamlit editor, use the "Packages" picker to add these
+# (they all live in the Snowflake Anaconda channel — no external hosting).
+name: app_environment
+channels:
+  - snowflake
+dependencies:
+  - streamlit
+  - snowflake-snowpark-python
+  - pandas
+  - plotly
+  - altair

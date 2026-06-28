@@ -1,0 +1,162 @@
+# =====================================================================
+# Cortex Analyst semantic model — Real-Time Financial Analytics Platform
+# Lets users ask business questions in plain English; Cortex Analyst
+# turns them into governed SQL over the GOLD marts.
+# Upload to stage RFAP_DB.GOLD.RFAP_SEMANTIC_STAGE (see sql/14).
+# =====================================================================
+name: rfap_finance
+description: >
+  Financial analytics: card-transaction spend, daily stock market prices,
+  and AI-enriched financial news. Use for questions about spending by
+  category/merchant, market prices and returns, and news sentiment.
+
+tables:
+  # -------------------------------------------------------------------
+  - name: transactions
+    description: One row per card transaction with derived features.
+    base_table:
+      database: RFAP_DB
+      schema: GOLD
+      table: TXN_FEATURES
+    dimensions:
+      - name: category
+        synonyms: ["spend category", "merchant category", "type of spend"]
+        description: Spending category.
+        expr: category
+        data_type: TEXT
+        sample_values: ["Groceries", "Dining", "Travel", "Entertainment",
+                        "Utilities", "Shopping", "Health", "Transport"]
+      - name: merchant
+        synonyms: ["store", "vendor", "retailer"]
+        expr: merchant
+        data_type: TEXT
+      - name: channel
+        synonyms: ["payment channel", "online or in person"]
+        expr: channel
+        data_type: TEXT
+        sample_values: ["online", "in_store"]
+      - name: country
+        synonyms: ["transaction country"]
+        expr: country
+        data_type: TEXT
+      - name: account_id
+        synonyms: ["cardholder", "customer", "account"]
+        expr: account_id
+        data_type: TEXT
+    time_dimensions:
+      - name: txn_ts
+        synonyms: ["transaction date", "when", "date"]
+        expr: txn_ts
+        data_type: TIMESTAMP_NTZ
+    measures:
+      - name: total_spend
+        synonyms: ["spend", "amount spent", "dollars"]
+        description: Total transaction amount.
+        expr: SUM(amount)
+        data_type: NUMBER
+        default_aggregation: sum
+      - name: transaction_count
+        synonyms: ["number of transactions", "txns", "count"]
+        expr: COUNT(txn_id)
+        data_type: NUMBER
+        default_aggregation: sum
+      - name: avg_ticket
+        synonyms: ["average transaction", "average amount"]
+        expr: AVG(amount)
+        data_type: NUMBER
+        default_aggregation: avg
+
+  # -------------------------------------------------------------------
+  - name: market
+    description: Daily OHLC prices and returns per ticker.
+    base_table:
+      database: RFAP_DB
+      schema: GOLD
+      table: MARKET_DAILY
+    dimensions:
+      - name: ticker
+        synonyms: ["stock", "symbol", "company"]
+        expr: ticker
+        data_type: TEXT
+        sample_values: ["AAPL", "MSFT", "NVDA", "AMZN", "TSLA", "JPM", "GS"]
+    time_dimensions:
+      - name: trade_date
+        synonyms: ["date", "trading day"]
+        expr: trade_date
+        data_type: DATE
+    measures:
+      - name: close_price
+        synonyms: ["price", "closing price"]
+        expr: AVG(close)
+        data_type: NUMBER
+        default_aggregation: avg
+      - name: avg_daily_return
+        synonyms: ["return", "daily return", "performance"]
+        expr: AVG(daily_return)
+        data_type: NUMBER
+        default_aggregation: avg
+      - name: total_volume
+        synonyms: ["volume", "shares traded"]
+        expr: SUM(volume)
+        data_type: NUMBER
+        default_aggregation: sum
+
+  # -------------------------------------------------------------------
+  - name: news
+    description: AI-enriched financial news with sentiment.
+    base_table:
+      database: RFAP_DB
+      schema: GOLD
+      table: NEWS_ENRICHED
+    dimensions:
+      - name: news_ticker
+        synonyms: ["news stock", "headline ticker"]
+        expr: ticker
+        data_type: TEXT
+      - name: sentiment_label
+        synonyms: ["sentiment", "tone"]
+        expr: sentiment_label
+        data_type: TEXT
+        sample_values: ["Positive", "Neutral", "Negative"]
+      - name: topic
+        synonyms: ["news topic", "theme"]
+        expr: topic
+        data_type: TEXT
+    time_dimensions:
+      - name: published_at
+        synonyms: ["news date", "published"]
+        expr: published_at
+        data_type: TIMESTAMP_NTZ
+    measures:
+      - name: article_count
+        synonyms: ["number of articles", "headlines"]
+        expr: COUNT(news_id)
+        data_type: NUMBER
+        default_aggregation: sum
+      - name: avg_sentiment
+        synonyms: ["average sentiment", "sentiment score"]
+        expr: AVG(sentiment_score)
+        data_type: NUMBER
+        default_aggregation: avg
+
+verified_queries:
+  - name: spend_by_category
+    question: What did customers spend the most on?
+    sql: >
+      SELECT category, SUM(amount) AS total_spend
+      FROM RFAP_DB.GOLD.TXN_FEATURES
+      GROUP BY category ORDER BY total_spend DESC
+
+  - name: worst_return_stock
+    question: Which stock had the worst average daily return?
+    sql: >
+      SELECT ticker, AVG(daily_return) AS avg_return
+      FROM RFAP_DB.GOLD.MARKET_DAILY
+      GROUP BY ticker ORDER BY avg_return ASC
+
+  - name: most_negative_news
+    question: Which stock had the most negative news?
+    sql: >
+      SELECT ticker, AVG(sentiment_score) AS avg_sentiment, COUNT(*) AS articles
+      FROM RFAP_DB.GOLD.NEWS_ENRICHED
+      GROUP BY ticker ORDER BY avg_sentiment ASC

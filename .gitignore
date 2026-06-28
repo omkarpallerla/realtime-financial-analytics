@@ -1,0 +1,24 @@
+# Secrets & credentials
+config/.env
+*.p8
+*.pem
+rsa_key*
+*.key
+
+# Generated data batches
+ingest/_batches/
+*.batch.json
+data/*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,11 @@
+# Local tooling for the Snowpipe lane + optional market backfill.
+# (The market-ingest lane runs INSIDE Snowflake and needs nothing here.)
+snowflake-ingest>=1.0.9      # Snowpipe REST API client (SimpleIngestManager)
+snowflake-connector-python>=3.7
+snowflake-snowpark-python>=1.14
+faker>=24.0                  # realistic synthetic card transactions
+requests>=2.31              # used by the in-cloud SP too (reference)
+yfinance>=0.2.37            # OPTIONAL local historical backfill
+pandas>=2.0
+python-dotenv>=1.0
+cryptography>=42.0          # key-pair (JWT) auth for Snowpipe
