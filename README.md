@@ -1,5 +1,11 @@
 # 📈 Real-Time Financial Analytics Platform
 
+![Snowflake](https://img.shields.io/badge/Snowflake-Cortex%20%7C%20Snowpark%20%7C%20Snowpipe-29B5E8?logo=snowflake&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-in--Snowflake-FF4B4B?logo=streamlit&logoColor=white)
+![Plotly](https://img.shields.io/badge/Plotly-charts-3F4F75?logo=plotly&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 ### A full, real-time fintech BI pipeline built **100% inside Snowflake** — Snowpipe + Tasks ingestion, a Snowpark medallion, the entire Cortex AI stack (forecasting, anomaly detection, fraud LLM, RAG, Text2SQL, an agent, embeddings), and a polished Streamlit dashboard.
 
 > **The story:** Live market data and synthetic card-transaction data stream in,
@@ -9,6 +15,17 @@
 > Snowflake trial.**
 
 ![architecture](docs/architecture.svg)
+
+---
+
+## 📸 Dashboard
+
+> Screenshots — drop PNGs into `docs/screenshots/` and they'll render here.
+> Suggested shots: Market (candlesticks), Anomalies & Fraud (gauge + LLM
+> reasons), Forecast (bands), AI Agent.
+
+<!-- ![market](docs/screenshots/market.png) -->
+<!-- ![fraud](docs/screenshots/fraud.png) -->
 
 ---
 
