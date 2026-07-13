@@ -45,8 +45,10 @@ CALL RFAP_PRICE_FC!FORECAST(
   FORECASTING_PERIODS => 7,
   CONFIG_OBJECT       => {'prediction_interval': 0.90});
 
+-- SERIES comes back as VARIANT for multi-series forecasts; cast to TEXT so
+-- it joins/displays cleanly (otherwise values render as quoted JSON strings).
 CREATE OR REPLACE TABLE PRICE_FORECAST AS
-  SELECT SERIES AS ticker, TS AS forecast_date, FORECAST, LOWER_BOUND, UPPER_BOUND
+  SELECT SERIES::string AS ticker, TS AS forecast_date, FORECAST, LOWER_BOUND, UPPER_BOUND
   FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
 
 -- ---- validation ----

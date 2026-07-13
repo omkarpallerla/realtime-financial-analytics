@@ -66,8 +66,10 @@ CALL RFAP_VOLUME_AD!DETECT_ANOMALIES(
   TARGET_COLNAME    => 'Y',
   CONFIG_OBJECT     => {'prediction_interval': 0.95});
 
+-- SERIES comes back as VARIANT for multi-series calls; cast to TEXT.
 CREATE OR REPLACE TABLE VOLUME_ANOMALIES AS
-  SELECT * FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
+  SELECT * EXCLUDE (SERIES), SERIES::string AS SERIES
+  FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()));
 
 -- ---- validation: how many anomalies did we flag? ----
 SELECT 'spend' AS kind, COUNT_IF(is_anomaly) AS anomalies, COUNT(*) AS points FROM SPEND_ANOMALIES
