@@ -3,7 +3,7 @@
 ![Snowflake](https://img.shields.io/badge/Snowflake-Cortex%20%7C%20Snowpark%20%7C%20Snowpipe-29B5E8?logo=snowflake&logoColor=white)
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-in--Snowflake-FF4B4B?logo=streamlit&logoColor=white)
-![Plotly](https://img.shields.io/badge/Plotly-charts-3F4F75?logo=plotly&logoColor=white)
+![Altair](https://img.shields.io/badge/Altair-charts-3F4F75?logo=plotly&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ### A full, real-time fintech BI pipeline built **100% inside Snowflake** — Snowpipe + Tasks ingestion, a Snowpark medallion, the entire Cortex AI stack (forecasting, anomaly detection, fraud LLM, RAG, Text2SQL, an agent, embeddings), and a polished Streamlit dashboard.
@@ -44,7 +44,7 @@
 | **RAG copilot** | **Cortex Search** over news for grounded answers |
 | **Text2SQL** | **Cortex Analyst** over a semantic model |
 | **AI Agent** | Routes between Analyst (SQL) and Search (news) and synthesizes |
-| **Dashboard** | **Streamlit-in-Snowflake** + Plotly — KPI cards, candlesticks, donuts, heatmaps, fraud gauges, forecast bands, daily AI brief |
+| **Dashboard** | **Streamlit-in-Snowflake** + Altair — KPI cards, candlesticks, donuts, heatmaps, fraud gauges, forecast bands, daily AI brief |
 
 ---
 
@@ -80,16 +80,34 @@ realtime-financial-analytics/
 ## 🚀 Run it
 
 You need a **Snowflake trial** (Cortex-enabled region: AWS `us-west-2`/`us-east-1`
-or Azure `east-us-2`). Follow **[docs/runbook.md](docs/runbook.md)** — it's the
-exact click-by-click order. In short:
+or Azure `east-us-2`).
 
-1. Run `sql/00`→`04` in Snowsight (foundation + market ingestion).
-2. Locally: `pip install -r requirements.txt`, generate transactions + news, and
-   stream them with the Snowpipe drip; optionally backfill market history.
-3. Run `sql/05`→`16` (medallion + the full AI layer).
-4. Upload `models/finance_semantic_model.yaml` to the semantic stage.
-5. Create the Streamlit app (`streamlit/app.py` + `ui.py`, packages `plotly`,
-   `altair`) and explore the eight tabs.
+### ⚡ Trial quickstart (100% in Snowsight, no local setup) — recommended
+Trial accounts block **External Access** (so the live Yahoo Task can't run) and
+Snowpipe needs local key-pair auth. To stand up the *entire* platform from the
+browser alone, use the synthetic-data path — it lands realistic market,
+transaction, and news data straight into BRONZE, and everything downstream (all
+the AI + the dashboard) works identically. Run these worksheets in order:
+
+```
+sql/00_setup.sql              sql/10_cortex_search.sql
+sql/02_bronze.sql             sql/11_cortex_fraud.sql
+sql/trial_demo/01_load_synthetic.sql   sql/12_vector_similarity.sql
+sql/trial_demo/02_build_silver.sql     sql/13_ai_aggregate.sql
+sql/trial_demo/03_build_gold.sql       sql/16_gold_views.sql
+sql/07_cortex_anomaly.sql
+sql/08_cortex_forecast.sql
+sql/09_cortex_news_ai.sql
+```
+Then create a Streamlit app, paste `streamlit/app.py` + `ui.py`, and Run. The
+app uses **Altair** (bundled — no package install) and does **Text2SQL with
+CORTEX.COMPLETE**, so it needs no External Access and no `_snowflake` module.
+
+### 🏭 Production path (paid account: live Snowpipe + External Access)
+Follow **[docs/runbook.md](docs/runbook.md)**: `sql/00`→`04` (Snowpipe + the
+Yahoo Task via External Access), stream data with `ingest/*.py`, then `sql/05`→`16`.
+The `sql/03,04` + `ingest/` + `snowpark/` code is the real-time ingestion design;
+the trial path above substitutes in-database synthetic data for it.
 
 ---
 
@@ -105,4 +123,4 @@ a few dollars of the $300 trial. **Tear everything down** with `sql/99_cleanup.s
 ## 🛠️ Built with
 Snowflake Snowpipe · Tasks · External Access · Snowpark Python · Cortex
 (ML Forecast, Anomaly Detection, LLM COMPLETE/SENTIMENT/SUMMARIZE, AI_CLASSIFY,
-AI_AGG, Search, Analyst, Agent, EMBED_TEXT_768) · Streamlit-in-Snowflake · Plotly · Python (Faker).
+AI_AGG, Search, Analyst, Agent, EMBED_TEXT_768) · Streamlit-in-Snowflake · Altair · Python (Faker).

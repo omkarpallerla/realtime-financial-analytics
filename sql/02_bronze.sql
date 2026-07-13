@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS RAW_MARKET (
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS RAW_TRANSACTIONS (
   record        VARIANT,
-  src_file      STRING DEFAULT METADATA$FILENAME,
+  src_file      STRING,                         -- set by COPY when loaded via Snowpipe
   ingested_at   TIMESTAMP_NTZ DEFAULT SYSDATE()
 );
 
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS RAW_TRANSACTIONS (
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS RAW_NEWS (
   record        VARIANT,
-  src_file      STRING DEFAULT METADATA$FILENAME,
+  src_file      STRING,                         -- set by COPY when loaded
   ingested_at   TIMESTAMP_NTZ DEFAULT SYSDATE()
 );
 
@@ -60,6 +60,6 @@ COPY INTO RAW_NEWS (record)
   ON_ERROR = CONTINUE;
 
 -- ---- validation ----
-SELECT 'RAW_MARKET' AS t, COUNT(*) AS rows FROM RAW_MARKET
+SELECT 'RAW_MARKET' AS t, COUNT(*) AS n_rows FROM RAW_MARKET
 UNION ALL SELECT 'RAW_TRANSACTIONS', COUNT(*) FROM RAW_TRANSACTIONS
 UNION ALL SELECT 'RAW_NEWS', COUNT(*) FROM RAW_NEWS;

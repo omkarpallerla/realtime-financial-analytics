@@ -1,10 +1,9 @@
 """
 Real-Time Financial Analytics Platform — Streamlit-in-Snowflake
 ===============================================================
-Paste app.py + ui.py into a Streamlit app in Snowsight
-(Projects > Streamlit > +). Database RFAP_DB, schema GOLD, warehouse
-RFAP_WH. Add packages plotly + altair via the Packages picker
-(see streamlit/environment.yml).
+Runs on trial Streamlit-in-Snowflake: charts use Altair (bundled), and
+Text2SQL uses CORTEX.COMPLETE to generate SQL (no _snowflake module, no
+External Access needed). Paste app.py + ui.py; database RFAP_DB, schema GOLD.
 
 Tabs:
   📈 Market   💳 Spend   🚨 Anomalies & Fraud   🔮 Forecast
@@ -13,9 +12,7 @@ Tabs:
 import json
 import pandas as pd
 import streamlit as st
-import plotly.graph_objects as go
-import plotly.express as px
-import _snowflake
+import altair as alt
 from snowflake.snowpark.context import get_active_session
 
 import ui
@@ -26,8 +23,22 @@ ui.inject_theme()
 session = get_active_session()
 
 SEARCH_SERVICE = "RFAP_DB.GOLD.RFAP_NEWS_SEARCH"
-SEMANTIC_MODEL = "@RFAP_DB.GOLD.RFAP_SEMANTIC_STAGE/finance_semantic_model.yaml"
 MODEL = "llama3.1-70b"
+
+# Schema context for LLM-generated Text2SQL.
+SCHEMA_DOC = """
+Snowflake tables (use fully-qualified names):
+RFAP_DB.GOLD.TXN_FEATURES(txn_id, account_id, txn_ts TIMESTAMP, amount FLOAT,
+  category, merchant, city, country, channel, is_fraud_label BOOLEAN,
+  txn_hour, amt_vs_cat_avg)  -- one row per card transaction
+RFAP_DB.GOLD.SPEND_DAILY(spend_date DATE, txn_count, total_spend, avg_ticket)
+RFAP_DB.GOLD.SPEND_BY_CATEGORY(spend_date DATE, category, txn_count, total_spend)
+RFAP_DB.GOLD.MARKET_DAILY(ticker, trade_date DATE, open, high, low, close,
+  volume, daily_return)  -- daily OHLC per stock ticker
+RFAP_DB.GOLD.NEWS_ENRICHED(news_id, published_at TIMESTAMP, ticker, headline,
+  body, sentiment_score FLOAT, sentiment_label, topic, summary)
+Tickers: AAPL, MSFT, NVDA, AMZN, TSLA, JPM, GS.
+"""
 
 
 # ---------------------------------------------------------------------
@@ -50,6 +61,15 @@ def human(n) -> str:
     return f"{n:,.1f}T"
 
 
+def theme(chart, height=320):
+    return (chart.properties(height=height)
+            .configure_view(strokeWidth=0)
+            .configure_axis(grid=True, gridColor=ui.LINE, domainColor=ui.LINE,
+                            labelColor=ui.MUTED, titleColor=ui.MUTED, tickColor=ui.LINE)
+            .configure_legend(labelColor=ui.TEXT, titleColor=ui.MUTED)
+            .configure(background="transparent"))
+
+
 def complete(prompt: str) -> str:
     p = prompt.replace("'", "''")
     return session.sql(
@@ -67,20 +87,32 @@ def search_news(query: str, limit: int = 5) -> list:
     return json.loads(raw).get("results", [])
 
 
-def ask_analyst(question: str) -> dict:
-    body = {"semantic_model_file": SEMANTIC_MODEL,
-            "messages": [{"role": "user",
-                          "content": [{"type": "text", "text": question}]}]}
-    resp = _snowflake.send_snow_api_request(
-        "POST", "/api/v2/cortex/analyst/message", {}, {}, body, {}, 30000)
-    return json.loads(resp["content"])
+def gen_sql(question: str) -> str:
+    """LLM Text2SQL: ask Cortex to write one Snowflake query for the question."""
+    prompt = (
+        "You are a Snowflake SQL expert. Using ONLY the schema below, write a "
+        "single valid Snowflake SQL query that answers the question. Return ONLY "
+        "the SQL — no explanation, no markdown code fences.\n\n"
+        f"{SCHEMA_DOC}\nQUESTION: {question}\nSQL:")
+    sql = complete(prompt)
+    # strip code fences / stray labels the model sometimes adds
+    sql = sql.replace("```sql", "").replace("```", "").strip()
+    if sql.lower().startswith("sql"):
+        sql = sql[3:].strip()
+    return sql.rstrip(";")
+
+
+def run_text2sql(question: str):
+    sql = gen_sql(question)
+    df = session.sql(sql).to_pandas()
+    return sql, df
 
 
 # ---------------------------------------------------------------------
 # Header + tabs
 # ---------------------------------------------------------------------
 ui.hero("📈 Real-Time Financial Analytics Platform",
-        "Live market + transaction data through a Snowflake medallion pipeline · "
+        "Market + transaction data through a Snowflake medallion pipeline · "
         "Cortex anomaly detection, forecasting, fraud AI, RAG & Text2SQL.")
 
 (tab_mkt, tab_spend, tab_fraud, tab_fc, tab_news,
@@ -95,15 +127,13 @@ ui.hero("📈 Real-Time Financial Analytics Platform",
 with tab_mkt:
     latest = q("SELECT * FROM RFAP_DB.GOLD.V_MARKET_LATEST")
     if latest.empty:
-        st.info("No market data yet — run sql/04 (and optionally "
-                "ingest/backfill_market.py), then sql/05–06.")
+        st.info("No market data yet.")
     else:
         tickers = sorted(latest["TICKER"].dropna().tolist())
         sel = st.selectbox("Ticker", tickers, key="mkt_ticker")
         row = latest[latest["TICKER"] == sel].iloc[0]
         up = (row["DAY_CHANGE_PCT"] or 0) >= 0
         n_up = int((latest["DAY_CHANGE_PCT"].fillna(0) >= 0).sum())
-
         ui.kpi_row([
             {"label": f"{sel} last price", "value": f"${row['LAST_PRICE']:,.2f}",
              "delta": f"{row['DAY_CHANGE']:+.2f} ({row['DAY_CHANGE_PCT']:+.2f}%)",
@@ -115,43 +145,38 @@ with tab_mkt:
         ])
         st.write("")
 
-        intra = q(f"""SELECT ts, open, high, low, close, volume
-                      FROM RFAP_DB.GOLD.V_MARKET_INTRADAY
-                      WHERE ticker = '{sel}' ORDER BY ts""")
-        left, right = st.columns([3, 2])
-        with left:
-            st.subheader(f"{sel} · intraday candles")
-            if intra.empty:
-                st.caption("No intraday candles yet for this ticker.")
-            else:
-                fig = go.Figure(go.Candlestick(
-                    x=intra["TS"], open=intra["OPEN"], high=intra["HIGH"],
-                    low=intra["LOW"], close=intra["CLOSE"],
-                    increasing_line_color=ui.GREEN, decreasing_line_color=ui.RED))
-                fig.update_layout(xaxis_rangeslider_visible=False)
-                st.plotly_chart(ui.style_fig(fig, 380, legend=False),
-                                use_container_width=True)
-        with right:
-            st.subheader("Volume")
-            if not intra.empty:
-                vfig = go.Figure(go.Bar(x=intra["TS"], y=intra["VOLUME"],
-                                        marker_color=ui.BLUE))
-                st.plotly_chart(ui.style_fig(vfig, 380, legend=False),
-                                use_container_width=True)
+        candles = q(f"""SELECT trade_date, open, high, low, close, volume
+                        FROM RFAP_DB.GOLD.MARKET_DAILY
+                        WHERE ticker = '{sel}' ORDER BY trade_date""")
+        if not candles.empty:
+            candles["TRADE_DATE"] = pd.to_datetime(candles["TRADE_DATE"])
+            st.subheader(f"{sel} · daily candles")
+            color = alt.condition("datum.OPEN <= datum.CLOSE",
+                                  alt.value(ui.GREEN), alt.value(ui.RED))
+            base = alt.Chart(candles).encode(x=alt.X("TRADE_DATE:T", title=None))
+            wick = base.mark_rule().encode(y="LOW:Q", y2="HIGH:Q", color=color)
+            body = base.mark_bar(size=5).encode(
+                y=alt.Y("OPEN:Q", title="price", scale=alt.Scale(zero=False)),
+                y2="CLOSE:Q", color=color)
+            st.altair_chart(theme(wick + body, 340), use_container_width=True)
+            vol = alt.Chart(candles).mark_bar(color=ui.BLUE, opacity=0.6).encode(
+                x=alt.X("TRADE_DATE:T", title=None), y=alt.Y("VOLUME:Q", title="volume"))
+            st.altair_chart(theme(vol, 130), use_container_width=True)
 
         st.divider()
         st.subheader("Daily returns heatmap")
         md = q("""SELECT ticker, trade_date, daily_return
                   FROM RFAP_DB.GOLD.MARKET_DAILY
                   WHERE daily_return IS NOT NULL ORDER BY trade_date""")
-        if md.empty:
-            st.caption("Needs a few days of history — run ingest/backfill_market.py.")
-        else:
-            pivot = md.pivot(index="TICKER", columns="TRADE_DATE", values="DAILY_RETURN")
-            hfig = px.imshow(pivot, aspect="auto", color_continuous_midpoint=0,
-                             color_continuous_scale=[ui.RED, ui.SURFACE, ui.GREEN])
-            st.plotly_chart(ui.style_fig(hfig, 280, legend=False),
-                            use_container_width=True)
+        if not md.empty:
+            md["TRADE_DATE"] = pd.to_datetime(md["TRADE_DATE"])
+            hm = alt.Chart(md).mark_rect().encode(
+                x=alt.X("TRADE_DATE:T", title=None, axis=alt.Axis(labels=False, ticks=False)),
+                y=alt.Y("TICKER:N", title=None),
+                color=alt.Color("DAILY_RETURN:Q",
+                                scale=alt.Scale(scheme="redyellowgreen", domainMid=0),
+                                legend=alt.Legend(title="return")))
+            st.altair_chart(theme(hm, 240), use_container_width=True)
 
 
 # ======================================================================
@@ -160,8 +185,7 @@ with tab_mkt:
 with tab_spend:
     k = q("SELECT * FROM RFAP_DB.GOLD.V_SPEND_KPIS")
     if k.empty or k.iloc[0]["SPEND_30D"] is None:
-        st.info("No transactions yet — run the generator + Snowpipe drip, "
-                "then sql/05–06.")
+        st.info("No transactions yet.")
     else:
         k = k.iloc[0]
         mom = k["SPEND_MOM_PCT"] or 0
@@ -174,24 +198,26 @@ with tab_spend:
             {"label": "Daily avg", "value": f"${human((k['SPEND_30D'] or 0)/30)}"},
         ])
         st.write("")
-
         c1, c2 = st.columns([2, 3])
         with c1:
             st.subheader("Spend by category (30d)")
             cat = q("SELECT * FROM RFAP_DB.GOLD.V_CATEGORY_SHARE")
-            dfig = px.pie(cat, names="CATEGORY", values="TOTAL_SPEND", hole=0.62,
-                          color_discrete_sequence=px.colors.sequential.Teal)
-            dfig.update_traces(textposition="outside", textinfo="percent+label")
-            st.plotly_chart(ui.style_fig(dfig, 360, legend=False),
-                            use_container_width=True)
+            donut = alt.Chart(cat).mark_arc(innerRadius=65).encode(
+                theta="TOTAL_SPEND:Q",
+                color=alt.Color("CATEGORY:N", legend=alt.Legend(title=None)),
+                tooltip=["CATEGORY", "TOTAL_SPEND"])
+            st.altair_chart(theme(donut, 340), use_container_width=True)
         with c2:
             st.subheader("Spend trend by category")
             sc = q("""SELECT spend_date, category, total_spend
                       FROM RFAP_DB.GOLD.SPEND_BY_CATEGORY ORDER BY spend_date""")
             if not sc.empty:
-                afig = px.area(sc, x="SPEND_DATE", y="TOTAL_SPEND", color="CATEGORY",
-                               color_discrete_sequence=px.colors.qualitative.Set3)
-                st.plotly_chart(ui.style_fig(afig, 360), use_container_width=True)
+                sc["SPEND_DATE"] = pd.to_datetime(sc["SPEND_DATE"])
+                area = alt.Chart(sc).mark_area().encode(
+                    x=alt.X("SPEND_DATE:T", title=None),
+                    y=alt.Y("TOTAL_SPEND:Q", stack="zero", title="spend"),
+                    color=alt.Color("CATEGORY:N", legend=alt.Legend(title=None)))
+                st.altair_chart(theme(area, 340), use_container_width=True)
 
         st.divider()
         st.subheader("🧠 AI spending insight")
@@ -217,45 +243,38 @@ with tab_fraud:
         st.info("Run sql/07_cortex_anomaly.sql first.")
     else:
         an["DAY"] = pd.to_datetime(an["DAY"])
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=an["DAY"], y=an["UPPER_BOUND"], line=dict(width=0),
-                                 showlegend=False, hoverinfo="skip"))
-        fig.add_trace(go.Scatter(x=an["DAY"], y=an["LOWER_BOUND"], fill="tonexty",
-                                 fillcolor="rgba(47,129,247,.12)", line=dict(width=0),
-                                 name="expected band"))
-        fig.add_trace(go.Scatter(x=an["DAY"], y=an["ACTUAL_SPEND"], mode="lines",
-                                 line=dict(color=ui.BLUE, width=2), name="actual"))
-        pts = an[an["IS_ANOMALY"] == 1]
-        fig.add_trace(go.Scatter(x=pts["DAY"], y=pts["ACTUAL_SPEND"], mode="markers",
-                                 marker=dict(color=ui.RED, size=11, symbol="x"),
-                                 name="anomaly"))
-        st.plotly_chart(ui.style_fig(fig, 340), use_container_width=True)
+        band = alt.Chart(an).mark_area(opacity=0.15, color=ui.BLUE).encode(
+            x=alt.X("DAY:T", title=None), y="LOWER_BOUND:Q", y2="UPPER_BOUND:Q")
+        line = alt.Chart(an).mark_line(color=ui.BLUE).encode(
+            x="DAY:T", y=alt.Y("ACTUAL_SPEND:Q", title="spend"))
+        pts = alt.Chart(an[an["IS_ANOMALY"] == 1]).mark_point(
+            color=ui.RED, size=90, shape="cross", filled=True).encode(
+            x="DAY:T", y="ACTUAL_SPEND:Q", tooltip=["DAY", "ACTUAL_SPEND"])
+        st.altair_chart(theme(band + line + pts, 320), use_container_width=True)
 
     st.divider()
     st.subheader("💳 AI fraud detection")
     fraud = q("SELECT * FROM RFAP_DB.GOLD.V_FRAUD_FLAGGED")
-    scored = q("SELECT ai_fraud_class, COUNT(*) AS n FROM RFAP_DB.GOLD.FRAUD_SCORED "
-               "GROUP BY ai_fraud_class") if True else None
+    try:
+        scored = q("SELECT ai_fraud_class, COUNT(*) AS n FROM RFAP_DB.GOLD.FRAUD_SCORED "
+                   "GROUP BY ai_fraud_class")
+        total = int(scored["N"].sum())
+        susp = int(scored[scored["AI_FRAUD_CLASS"] == "Suspicious"]["N"].sum())
+        pct = 100 * susp / total if total else 0
+    except Exception:
+        scored, total, susp, pct = None, 0, 0, 0
+
     g1, g2 = st.columns([1, 2])
     with g1:
-        try:
-            total = int(scored["N"].sum())
-            susp = int(scored[scored["AI_FRAUD_CLASS"] == "Suspicious"]["N"].sum())
-            pct = 100 * susp / total if total else 0
-            gfig = go.Figure(go.Indicator(
-                mode="gauge+number", value=pct,
-                number={"suffix": "%"},
-                title={"text": "Suspicious share"},
-                gauge={"axis": {"range": [0, 100]},
-                       "bar": {"color": ui.RED},
-                       "steps": [{"range": [0, 33], "color": "rgba(22,199,132,.25)"},
-                                 {"range": [33, 66], "color": "rgba(240,160,32,.25)"},
-                                 {"range": [66, 100], "color": "rgba(234,57,67,.25)"}]}))
-            st.plotly_chart(ui.style_fig(gfig, 260, legend=False),
-                            use_container_width=True)
-            st.caption(f"{susp} suspicious of {total} AI-reviewed candidates")
-        except Exception:
-            st.info("Run sql/11_cortex_fraud.sql to score fraud.")
+        ui.kpi_row([{"label": "Suspicious share", "value": f"{pct:.0f}%",
+                     "positive": pct < 33, "delta": f"{susp} of {total} reviewed"}])
+        if scored is not None and not scored.empty:
+            bar = alt.Chart(scored).mark_bar().encode(
+                x=alt.X("N:Q", title=None), y=alt.Y("AI_FRAUD_CLASS:N", title=None),
+                color=alt.Color("AI_FRAUD_CLASS:N", legend=None,
+                                scale=alt.Scale(domain=["Legitimate", "Suspicious"],
+                                                range=[ui.GREEN, ui.RED])))
+            st.altair_chart(theme(bar, 130), use_container_width=True)
     with g2:
         st.markdown("**Flagged transactions — with the LLM's reasoning**")
         if fraud.empty:
@@ -284,6 +303,17 @@ with tab_fraud:
 # ======================================================================
 # TAB 4 — FORECAST
 # ======================================================================
+def forecast_chart(hist, fc, hist_x, hist_y, fx, actual_color, fc_color):
+    h = alt.Chart(hist).mark_line(color=actual_color).encode(
+        x=alt.X(f"{hist_x}:T", title=None),
+        y=alt.Y(f"{hist_y}:Q", title=None, scale=alt.Scale(zero=False)))
+    bandc = alt.Chart(fc).mark_area(opacity=0.18, color=fc_color).encode(
+        x=alt.X(f"{fx}:T"), y="LOWER_BOUND:Q", y2="UPPER_BOUND:Q")
+    fcl = alt.Chart(fc).mark_line(color=fc_color, strokeDash=[5, 4]).encode(
+        x=f"{fx}:T", y="FORECAST:Q")
+    return theme(h + bandc + fcl, 340)
+
+
 with tab_fc:
     st.subheader("🔮 Spend forecast (next 14 days)")
     st.caption("SNOWFLAKE.ML.FORECAST with a 90% prediction interval.")
@@ -292,41 +322,25 @@ with tab_fc:
     if fc.empty:
         st.info("Run sql/08_cortex_forecast.sql first.")
     else:
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=pd.to_datetime(hist["D"]), y=hist["Y"],
-                                 mode="lines", line=dict(color=ui.BLUE), name="actual"))
-        fig.add_trace(go.Scatter(x=pd.to_datetime(fc["FORECAST_DATE"]), y=fc["UPPER_BOUND"],
-                                 line=dict(width=0), showlegend=False, hoverinfo="skip"))
-        fig.add_trace(go.Scatter(x=pd.to_datetime(fc["FORECAST_DATE"]), y=fc["LOWER_BOUND"],
-                                 fill="tonexty", fillcolor="rgba(22,199,132,.15)",
-                                 line=dict(width=0), name="90% interval"))
-        fig.add_trace(go.Scatter(x=pd.to_datetime(fc["FORECAST_DATE"]), y=fc["FORECAST"],
-                                 mode="lines", line=dict(color=ui.GREEN, dash="dash"),
-                                 name="forecast"))
-        st.plotly_chart(ui.style_fig(fig, 360), use_container_width=True)
+        hist["D"] = pd.to_datetime(hist["D"])
+        fc["FORECAST_DATE"] = pd.to_datetime(fc["FORECAST_DATE"])
+        st.altair_chart(forecast_chart(hist, fc, "D", "Y", "FORECAST_DATE",
+                        ui.BLUE, ui.GREEN), use_container_width=True)
 
     st.divider()
     st.subheader("Price forecast (next 7 days)")
     pf = q("SELECT * FROM RFAP_DB.GOLD.V_PRICE_FORECAST")
     if pf.empty:
-        st.caption("Run sql/08 (needs market history from backfill_market.py).")
+        st.caption("Run sql/08.")
     else:
         t = st.selectbox("Ticker", sorted(pf["TICKER"].unique()), key="fc_ticker")
-        sub = pf[pf["TICKER"] == t]
+        sub = pf[pf["TICKER"] == t].copy()
+        sub["FORECAST_DATE"] = pd.to_datetime(sub["FORECAST_DATE"])
         recent = q(f"""SELECT trade_date AS d, close AS y FROM RFAP_DB.GOLD.MARKET_DAILY
                        WHERE ticker='{t}' ORDER BY trade_date""")
-        pfig = go.Figure()
-        pfig.add_trace(go.Scatter(x=pd.to_datetime(recent["D"]), y=recent["Y"],
-                                  mode="lines", line=dict(color=ui.BLUE), name="actual"))
-        pfig.add_trace(go.Scatter(x=pd.to_datetime(sub["FORECAST_DATE"]), y=sub["UPPER_BOUND"],
-                                  line=dict(width=0), showlegend=False, hoverinfo="skip"))
-        pfig.add_trace(go.Scatter(x=pd.to_datetime(sub["FORECAST_DATE"]), y=sub["LOWER_BOUND"],
-                                  fill="tonexty", fillcolor="rgba(47,129,247,.15)",
-                                  line=dict(width=0), name="90% interval"))
-        pfig.add_trace(go.Scatter(x=pd.to_datetime(sub["FORECAST_DATE"]), y=sub["FORECAST"],
-                                  mode="lines", line=dict(color=ui.AMBER, dash="dash"),
-                                  name="forecast"))
-        st.plotly_chart(ui.style_fig(pfig, 360), use_container_width=True)
+        recent["D"] = pd.to_datetime(recent["D"])
+        st.altair_chart(forecast_chart(recent, sub, "D", "Y", "FORECAST_DATE",
+                        ui.BLUE, ui.AMBER), use_container_width=True)
 
 
 # ======================================================================
@@ -336,7 +350,7 @@ with tab_news:
     st.subheader("📰 News & sentiment")
     feed = q("SELECT * FROM RFAP_DB.GOLD.V_NEWS_FEED LIMIT 200")
     if feed.empty:
-        st.info("Run news_generator.py + sql/09_cortex_news_ai.sql.")
+        st.info("Run sql/09_cortex_news_ai.sql.")
     else:
         c1, c2 = st.columns([3, 2])
         with c1:
@@ -344,20 +358,20 @@ with tab_news:
             for _, r in feed.head(12).iterrows():
                 lab = r["SENTIMENT_LABEL"]
                 kind = {"Positive": "pos", "Negative": "neg"}.get(lab, "neu")
-                bk = {"Positive": "pos", "Negative": "neg"}.get(lab, "neu")
                 st.markdown(
                     f'<div class="card {kind}"><div class="h">{r["TICKER"]} · '
-                    f'{r["HEADLINE"]} {ui.badge(lab, bk)}</div>'
+                    f'{r["HEADLINE"]} {ui.badge(lab, kind)}</div>'
                     f'<div class="m">{r["SUMMARY"]}</div></div>',
                     unsafe_allow_html=True)
         with c2:
             st.markdown("**Sentiment mix**")
             dist = feed.groupby("SENTIMENT_LABEL").size().reset_index(name="n")
-            cmap = {"Positive": ui.GREEN, "Negative": ui.RED, "Neutral": ui.MUTED}
-            bfig = px.bar(dist, x="SENTIMENT_LABEL", y="n", color="SENTIMENT_LABEL",
-                          color_discrete_map=cmap)
-            st.plotly_chart(ui.style_fig(bfig, 260, legend=False),
-                            use_container_width=True)
+            bar = alt.Chart(dist).mark_bar().encode(
+                x=alt.X("SENTIMENT_LABEL:N", title=None), y=alt.Y("n:Q", title=None),
+                color=alt.Color("SENTIMENT_LABEL:N", legend=None,
+                    scale=alt.Scale(domain=["Positive", "Neutral", "Negative"],
+                                    range=[ui.GREEN, ui.MUTED, ui.RED])))
+            st.altair_chart(theme(bar, 240), use_container_width=True)
 
             st.markdown("**Price vs. news sentiment**")
             pvt_t = st.selectbox("Ticker", sorted(feed["TICKER"].unique()),
@@ -366,52 +380,43 @@ with tab_news:
                         FROM RFAP_DB.GOLD.V_PRICE_VS_SENTIMENT
                         WHERE ticker='{pvt_t}' ORDER BY trade_date""")
             if not pvs.empty:
-                dfig = go.Figure()
-                dfig.add_trace(go.Scatter(x=pd.to_datetime(pvs["TRADE_DATE"]),
-                                          y=pvs["CLOSE"], name="close",
-                                          line=dict(color=ui.BLUE)))
-                dfig.add_trace(go.Scatter(x=pd.to_datetime(pvs["TRADE_DATE"]),
-                                          y=pvs["AVG_SENTIMENT"], name="sentiment",
-                                          line=dict(color=ui.AMBER), yaxis="y2"))
-                dfig.update_layout(yaxis2=dict(overlaying="y", side="right",
-                                               showgrid=False, range=[-1, 1]))
-                st.plotly_chart(ui.style_fig(dfig, 280), use_container_width=True)
+                pvs["TRADE_DATE"] = pd.to_datetime(pvs["TRADE_DATE"])
+                base = alt.Chart(pvs).encode(x=alt.X("TRADE_DATE:T", title=None))
+                price = base.mark_line(color=ui.BLUE).encode(
+                    y=alt.Y("CLOSE:Q", title="close", scale=alt.Scale(zero=False)))
+                sent = base.mark_line(color=ui.AMBER).encode(
+                    y=alt.Y("AVG_SENTIMENT:Q", title="sentiment"))
+                st.altair_chart(theme(alt.layer(price, sent).resolve_scale(y="independent"),
+                                      260), use_container_width=True)
 
 
 # ======================================================================
-# TAB 6 — AI AGENT (orchestrates Analyst SQL + News RAG)
+# TAB 6 — AI AGENT (Text2SQL + News RAG, synthesized)
 # ======================================================================
 with tab_agent:
     st.subheader("🤖 AI Analyst Agent")
-    st.caption("One bot, two tools: it queries the data (Cortex Analyst) AND "
-               "retrieves news (Cortex Search), then synthesizes an answer.")
-    st.write("Try:  `Which stock looks weakest and what news explains it?`  ·  "
-             "`Summarize spend and any fraud risk this month.`")
+    st.caption("One bot, two tools: it writes SQL to query the data AND retrieves "
+               "news (Cortex Search), then synthesizes an answer.")
+    st.write("Try:  `Which stock had the worst return and what news explains it?`  ·  "
+             "`Summarize spend by category and any fraud risk.`")
     aq = st.text_input("Ask the agent", key="agent_q",
-                       placeholder="e.g. What's driving the move in NVDA?")
+                       placeholder="e.g. What's the spending trend and news on NVDA?")
     if st.button("Run agent", type="primary", key="agent_btn") and aq:
-        data_df, news_hits, data_note = None, [], ""
-        with st.spinner("Tool 1/2 · querying the data (Cortex Analyst)…"):
+        data_df, news_hits, gsql = None, [], ""
+        with st.spinner("Tool 1/2 · writing + running SQL…"):
             try:
-                res = ask_analyst(aq)
-                content = res["message"]["content"]
-                for item in content:
-                    if item["type"] == "text":
-                        data_note += item["text"] + " "
-                sql_item = next((c for c in content if c["type"] == "sql"), None)
-                if sql_item:
-                    data_df = session.sql(sql_item["statement"]).to_pandas()
+                gsql, data_df = run_text2sql(aq)
             except Exception as e:
-                data_note = f"(Analyst unavailable: {e})"
+                gsql = f"-- SQL tool failed: {e}"
         with st.spinner("Tool 2/2 · retrieving news (Cortex Search)…"):
             try:
                 news_hits = search_news(aq, 5)
             except Exception:
                 news_hits = []
 
-        ctx = f"DATA FINDINGS: {data_note}\n"
+        ctx = ""
         if data_df is not None and not data_df.empty:
-            ctx += "TABLE:\n" + data_df.head(10).to_csv(index=False) + "\n"
+            ctx += "DATA (from generated SQL):\n" + data_df.head(10).to_csv(index=False) + "\n"
         if news_hits:
             ctx += "NEWS:\n" + "\n".join(
                 f"- ({h.get('ticker')}/{h.get('sentiment_label')}) {h.get('headline')}"
@@ -419,15 +424,18 @@ with tab_agent:
 
         with st.spinner("Synthesizing final answer…"):
             final = complete(
-                "You are a financial analyst agent. Using the data findings and "
-                "news below, answer the user's question concisely, cite numbers and "
-                "specific headlines, and note any caveats.\n\n"
+                "You are a financial analyst agent. Using the data and news below, "
+                "answer the question concisely, cite numbers and specific headlines, "
+                "and note caveats.\n\n"
                 f"QUESTION: {aq}\n\n{ctx}")
         st.markdown("### Answer")
         st.write(final)
         if data_df is not None and not data_df.empty:
             with st.expander("📊 Data the agent queried"):
                 st.dataframe(data_df, use_container_width=True, hide_index=True)
+        if gsql:
+            with st.expander("🧾 SQL the agent wrote"):
+                st.code(gsql, language="sql")
         if news_hits:
             with st.expander(f"📰 News the agent retrieved ({len(news_hits)})"):
                 st.dataframe(pd.DataFrame(news_hits), use_container_width=True,
@@ -435,37 +443,33 @@ with tab_agent:
 
 
 # ======================================================================
-# TAB 7 — ASK IN ENGLISH (Cortex Analyst Text2SQL)
+# TAB 7 — ASK IN ENGLISH (LLM Text2SQL)
 # ======================================================================
 with tab_analyst:
     st.subheader("💬 Ask business questions in plain English")
-    st.caption("Cortex Analyst turns your question into governed SQL, runs it, "
+    st.caption("Cortex COMPLETE turns your question into Snowflake SQL, runs it, "
                "and shows the result + the generated SQL.")
     st.write("Try:  `What did customers spend the most on?`  ·  "
-             "`Which stock had the worst average daily return?`")
+             "`Which stock had the worst average daily return?`  ·  "
+             "`Total spend by category`")
     nq = st.text_input("Your question", key="analyst_q",
-                       placeholder="e.g. Total spend by category last month")
+                       placeholder="e.g. Average daily spend last week")
     if st.button("Ask", type="primary", key="analyst_btn") and nq:
         with st.spinner("Generating SQL and running it…"):
             try:
-                result = ask_analyst(nq)
-                content = result["message"]["content"]
-                for item in content:
-                    if item["type"] == "text":
-                        st.markdown(item["text"])
-                sql_item = next((c for c in content if c["type"] == "sql"), None)
-                if sql_item:
-                    gsql = sql_item["statement"]
-                    df = session.sql(gsql).to_pandas()
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-                    if df.shape[1] == 2 and df.shape[0] > 1:
-                        st.bar_chart(df, x=df.columns[0], y=df.columns[1])
-                    with st.expander("🧾 Generated SQL"):
-                        st.code(gsql, language="sql")
+                gsql, df = run_text2sql(nq)
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                if df.shape[1] == 2 and df.shape[0] > 1:
+                    xcol, ycol = df.columns[0], df.columns[1]
+                    ch = alt.Chart(df).mark_bar(color=ui.BLUE).encode(
+                        x=alt.X(f"{xcol}:N", sort="-y", title=None),
+                        y=alt.Y(f"{ycol}:Q", title=None))
+                    st.altair_chart(theme(ch, 300), use_container_width=True)
+                with st.expander("🧾 Generated SQL"):
+                    st.code(gsql, language="sql")
             except Exception as e:
-                st.error(f"Analyst call failed: {e}")
-                st.info("Run sql/14 and upload finance_semantic_model.yaml "
-                        "to RFAP_SEMANTIC_STAGE.")
+                st.error(f"Couldn't answer that one: {e}")
+                st.caption("Try rephrasing — the model writes SQL against the GOLD tables.")
 
 
 # ======================================================================
@@ -498,10 +502,9 @@ with tab_brief:
                 st.markdown(complete(prompt))
             except Exception as e:
                 st.error(f"Couldn't build the brief: {e}")
-                st.info("Make sure tabs' underlying tables exist (run sql/06–16).")
 
 
 st.divider()
 st.caption("Built with Snowflake Snowpipe · Snowpark · Cortex (ML Forecast, "
-           "Anomaly Detection, LLM, Search, Analyst, Agent, Embeddings) · "
-           "Streamlit-in-Snowflake · Plotly.")
+           "Anomaly Detection, LLM, Search, Text2SQL, Embeddings) · "
+           "Streamlit-in-Snowflake · Altair.")

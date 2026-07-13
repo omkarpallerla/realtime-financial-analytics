@@ -112,7 +112,7 @@ LEFT JOIN s ON s.ticker = m.ticker AND s.d = m.trade_date
 ORDER BY m.ticker, m.trade_date;
 
 -- ---- validation ----
-SELECT 'market_latest' AS v, COUNT(*) AS rows FROM V_MARKET_LATEST
+SELECT 'market_latest' AS v, COUNT(*) AS n_rows FROM V_MARKET_LATEST
 UNION ALL SELECT 'spend_trend', COUNT(*) FROM V_SPEND_TREND
 UNION ALL SELECT 'fraud_flagged', COUNT(*) FROM V_FRAUD_FLAGGED
 UNION ALL SELECT 'news_feed', COUNT(*) FROM V_NEWS_FEED;
